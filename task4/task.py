@@ -1,214 +1,206 @@
-# добавить кластерную ранжировку
 import json
-import re
-import numpy as np
+import math
 
-def fix_json(json_str):
-    # обработка исходных файлов от лишних запятых и тд
-    json_str = json_str.strip()
-    json_str = re.sub(r',\s*]', ']', json_str)
-    json_str = re.sub(r',\s*}', '}', json_str)
+def interpolate(x, points):
+# линейная интерполяция
+    n = len(points)
+    if x <= points[0][0]:
+        return points[0][1]
+    if x >= points[-1][0]:
+        return points[-1][1]
     
-    while ',,' in json_str:
-        json_str = json_str.replace(',,', ',')
-    
-    return json.loads(json_str)
+    for i in range(n - 1):
+        x1, y1 = points[i]
+        x2, y2 = points[i + 1]
+        if x1 <= x <= x2:
+            if x1 == x2:
+                return max(y1, y2)
+            return y1 + (y2 - y1) * (x - x1) / (x2 - x1)
+    return 0.0
 
-def ranking_to_matrix(ranking, elements):
-    n = len(elements)
-    matrix = np.zeros((n, n), dtype=int)
-    
-    # позиции элементов
-    positions = {}
-    for pos, group in enumerate(ranking):
-        if isinstance(group, list):
-            for elem in group:
-                positions[elem] = pos
-        else:
-            positions[group] = pos
-    
-    # заполняем матрицу
-    for i in range(n):
-        for j in range(n):
-            elem_i = elements[i]
-            elem_j = elements[j]
-            
-            pos_i = positions.get(elem_i, -1)
-            pos_j = positions.get(elem_j, -1)
-            
-            if pos_i <= pos_j:
-                matrix[i][j] = 1
-    
-    return matrix
+def fuzzify(temperature, fuzzy_sets):
+# фаззификация
+    membership = {}
+    for term in fuzzy_sets:
+        term_id = term["id"]
+        points = term["points"]
+        membership[term_id] = interpolate(temperature, points)
+    return membership
 
-def find_contradictions(a, b):
-    # находим ядро противоречий между двумя ранжировками
-    # получаем все элементы
-    elements = []
-    for ranking in [a, b]:
-        for item in ranking:
-            if isinstance(item, list):
-                elements.extend(item)
-            else:
-                elements.append(item)
-    
-    elements = sorted(set(elements))
-    
-    # получаем позицию элемента
-    def get_position(ranking, elem):
-        for i, group in enumerate(ranking):
-            if isinstance(group, list):
-                if elem in group:
-                    return i
-            elif elem == group:
-                return i
-        return -1
-    
-    # ищем противоречия
-    contradictions = []
-    
-    for i in range(len(elements)):
-        for j in range(i + 1, len(elements)):
-            elem1, elem2 = elements[i], elements[j]
-            
-            pos1_a = get_position(a, elem1)
-            pos2_a = get_position(a, elem2)
-            pos1_b = get_position(b, elem1)  
-            pos2_b = get_position(b, elem2)
-            
-            # проверяем противоречие
-            if (pos1_a < pos2_a and pos1_b > pos2_b) or (pos1_a > pos2_a and pos1_b < pos2_b):
-                contradictions.append([str(elem1), str(elem2)])
-    
-    return contradictions
+def rule_activation(temperature_membership, rule_mapping):
+# вычисление уровней активации
+    activation = {}
+    for rule in rule_mapping:
+        temp_term, control_term = rule
+        # уровень активации = степень принадлежности к входному терму
+        activation[control_term] = temperature_membership.get(temp_term, 0.0)
+    return activation
 
-def build_consistent_ranking(a, b):
-    # строим согласованную кластерную ранжировку
-    # Получаем все элементы
-    elements = []
-    for ranking in [a, b]:
-        for item in ranking:
-            if isinstance(item, list):
-                elements.extend(item)
-            else:
-                elements.append(item)
+def apply_activation(control_term_sets, activation_levels):
+    activated_sets = []
     
-    elements = sorted(set(elements))
-    n = len(elements)
-    
-    # строим матрицы отношений
-    Y_A = ranking_to_matrix(a, elements)
-    Y_B = ranking_to_matrix(b, elements)
-    
-    # транспонированные матрицы
-    Y_A_T = Y_A.T
-    Y_B_T = Y_B.T
-    
-    # матрица противоречий
-    P = np.logical_or(np.logical_and(Y_A, Y_B_T), np.logical_and(Y_A_T, Y_B)).astype(int)
-    
-    # ядро противоречий
-    contradiction_pairs = []
-    for i in range(n):
-        for j in range(i + 1, n):
-            if P[i, j] == 0:
-                contradiction_pairs.append((elements[i], elements[j]))
-    
-    # матрица согласованного порядка
-    C = np.logical_and(Y_A, Y_B).astype(int)
-    
-    # учет противоречий
-    for elem1, elem2 in contradiction_pairs:
-        i = elements.index(elem1)
-        j = elements.index(elem2)
-        C[i, j] = 1
-        C[j, i] = 1
-    
-    # матрица эквивалентности
-    E = np.logical_and(C, C.T).astype(int)
-    
-    # алгоритм Уоршелла
-    E_star = E.copy()
-    for k in range(n):
-        for i in range(n):
-            for j in range(n):
-                if E_star[i, k] and E_star[k, j]:
-                    E_star[i, j] = 1
-    
-    # выделение кластеров
-    clusters = []
-    visited = set()
-    
-    for i in range(n):
-        if i not in visited:
-            cluster = []
-            for j in range(n):
-                if E_star[i, j] == 1:
-                    cluster.append(elements[j])
-                    visited.add(j)
-            clusters.append(sorted(cluster))
-    
-    # упорядочивание кластеров
-    cluster_order = []
-    remaining_clusters = clusters.copy()
-    
-    while remaining_clusters:
-        # находим минимальный кластер
-        for cluster in remaining_clusters:
-            is_minimal = True
-            rep_elem = cluster[0] 
-            
-            for other_cluster in remaining_clusters:
-                if cluster == other_cluster:
-                    continue
-                    
-                other_rep = other_cluster[0]
-                rep_idx = elements.index(rep_elem)
-                other_idx = elements.index(other_rep)
-
-                if C[other_idx, rep_idx] == 1 and C[rep_idx, other_idx] == 0:
-                    is_minimal = False
-                    break
-            
-            if is_minimal:
-                cluster_order.append(cluster)
-                remaining_clusters.remove(cluster)
+    for control_term, level in activation_levels.items():
+      # находим точки
+        points = None
+        for term_set in control_term_sets:
+            if term_set["id"] == control_term:
+                points = term_set["points"]
                 break
+        
+        if points is None:
+            continue
+        
+        activated_points = []
+        for x, y in points:
+            activated_y = min(level, y)
+            activated_points.append([x, activated_y])
+        
+        activated_sets.append(activated_points)
+    
+    return activated_sets
 
-    result = []
-    for cluster in cluster_order:
-        if len(cluster) == 1:
-            result.append(cluster[0])
+def aggregate_sets(activated_sets, x_range=100, step=0.1):
+# объединение активированных нечетких множеств
+    # создаем дискретные точки для объединения
+    x_values = [i * step for i in range(int(x_range / step) + 1)]
+    aggregated = []
+    
+    for x in x_values:
+        max_y = 0.0
+        for points in activated_sets:
+            y = interpolate(x, points)
+            max_y = max(max_y, y)
+        aggregated.append([x, max_y])
+    
+    return aggregated
+
+def defuzzify_first_max(aggregated_set, step=0.1):
+# дефаззификация
+    if not aggregated_set:
+        return 0.0
+
+    max_y = max(y for _, y in aggregated_set)
+
+    for x, y in aggregated_set:
+        if abs(y - max_y) < 1e-6:  
+            return x
+    
+    return aggregated_set[0][0] 
+
+def main(temperature_json, control_json, rules_json, current_temp):
+# функция для вычисления оптимального управления
+    temp_data = json.loads(temperature_json)
+    control_data = json.loads(control_json)
+    rules_data = json.loads(rules_json)
+
+    temp_sets = temp_data.get("температура", [])
+    control_sets = control_data.get("температура", [])  
+    if not control_sets:
+        control_sets = control_data.get("уровень нагрева", [])
+    if not control_sets:
+        if isinstance(control_data, list):
+            control_sets = control_data
         else:
-            result.append(cluster)
+            for key, value in control_data.items():
+                if isinstance(value, list):
+                    control_sets = value
+                    break
     
-    return result
-
-def main(ranking_a_str, ranking_b_str, output_type="contradictions"):
-
-    # парсим ранжировки
-    a = fix_json(ranking_a_str)
-    b = fix_json(ranking_b_str)
+    # фаззификация
+    temperature_membership = fuzzify(current_temp, temp_sets)
     
-    if output_type == "contradictions":
-        # ядро противоречий
-        contradictions = find_contradictions(a, b)
-        return json.dumps(contradictions)
+    # активация правил
+    activation_levels = rule_activation(temperature_membership, rules_data)
     
-    elif output_type == "ranking":
-        # согласованная кластерная ранжировка
-        consistent_ranking = build_consistent_ranking(a, b)
-        return json.dumps(consistent_ranking)
+    # применение активации к множествам управления
+    activated_sets = apply_activation(control_sets, activation_levels)
+    
+    # объединение результатов
+    aggregated_set = aggregate_sets(activated_sets, x_range=10, step=0.01)
+    
+    # дефаззификация
+    optimal_control = defuzzify_first_max(aggregated_set, step=0.01)
+    
+    return round(optimal_control, 2)
 
 if __name__ == "__main__":
-    with open('Ранжировка  A.json', 'r', encoding='utf-8') as f:
-        a_str = f.read()
+    temp_json = """
+    {
+      "температура": [
+          {
+          "id": "холодно",
+          "points": [
+              [0,1],
+              [18,1],
+              [22,0],
+              [50,0]
+          ]
+          },
+          {
+          "id": "комфортно",
+          "points": [
+              [18,0],
+              [22,1],
+              [24,1],
+              [26,0]
+          ]
+          },
+          {
+          "id": "жарко",
+          "points": [
+              [0,0],
+              [24,0],
+              [26,1],
+              [50,1]
+          ]
+          }
+      ]
+    }
+    """
     
-    with open('Ранжировка  B.json', 'r', encoding='utf-8') as f:
-        b_str = f.read()
-
-    contradictions = main(a_str, b_str, "contradictions")
-    print("ядро противоречий:", contradictions)
-
-    consistent_ranking = main(a_str, b_str, "ranking")
-    print("согласованная ранжировка:", consistent_ranking)
+    control_json = """
+    {
+      "температура": [
+          {
+            "id": "слабый",
+            "points": [
+                [0,0],
+                [0,1],
+                [5,1],
+                [8,0]
+            ]
+          },
+          {
+            "id": "умеренный",
+            "points": [
+                [5,0],
+                [8,1],
+                [13,1],
+                [16,0]
+            ]
+          },
+          {
+            "id": "интенсивный",
+            "points": [
+                [13,0],
+                [18,1],
+                [23,1],
+                [26,0]
+            ]
+          }
+      ]
+    }
+    """
+    
+    rules_json = """
+    [
+        ["холодно", "интенсивный"],
+        ["комфортно", "умеренный"],
+        ["жарко", "слабый"]
+    ]
+    """
+    
+    test_temps = [15, 20, 25, 30]
+    for temp in test_temps:
+        result = main(temp_json, control_json, rules_json, temp)
+        print(f"Температура: {temp}°C -> Оптимальное управление: {result}")
